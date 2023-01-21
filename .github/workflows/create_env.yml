@@ -1,0 +1,139 @@
+name: Create On-Demand Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "Environment_Name / Namespace"
+        required: true
+        default: ""
+
+      mysql_snapshot:
+        description: "MySQL snapshot to provision the env with"
+        required: false
+        default: staging-24-12-2022
+
+      hello_world_version:
+        description: "Hello World Version"
+        required: true
+        default: "main-latest"
+
+env:
+  PROJECT_ID: ${{ secrets.PROJECT_ID }}
+  GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}
+  GKE_ZONE: ${{ secrets.GKE_ZONE }}
+  SNAPSHOT: ${{ github.event.inputs.mysql_snapshot }}
+  WORKLOAD_IDENTITY: ${{ secrets.WORKLOAD_IDENTITY }}
+  SERVICE_ACCOUNT: ${{ secrets.SERVICE_ACCOUNT }}
+
+jobs:
+  checkup:
+    name: Scanning Environment Name
+    outputs:
+      env_checks: ${{ steps.check_env_name.outputs.env_checks }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+    timeout-minutes: 30
+    steps:
+      # Preparing environment
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - uses: "google-github-actions/auth@v1"
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY }}
+          service_account: ${{ env.SERVICE_ACCOUNT }}
+
+      # Configure docker to use the gcloud command-line tool as a credential helper
+      - name: Authenticate docker registry
+        run: |-
+          gcloud --quiet auth configure-docker
+
+      # Get the GKE credentials so we can deploy to the cluster
+      - uses: google-github-actions/get-gke-credentials@v1
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GKE_ZONE }}
+
+      # Namespace
+      - run: echo "NAMESPACE=${{ github.event.inputs.name }}" >> $GITHUB_ENV
+
+      # check environment name syntax
+      - name: scan namespace
+        id: check_env_name
+        run: |
+          echo "Starting Environment Name Scaning"
+          size=${#NAMESPACE}
+          if [[ `expr "$NAMESPACE" : ".*[!' '@#\$%^\&*()_+].*"` -gt 0 || "$size" -gt 20 ]];
+          then
+            echo "Make sure that your environment name does not contain special chars [!' '@#\$%^\&*()_+ ] or spaces and less than 17 character"
+            exit 1
+          elif [[ $(kubectl get ns $NAMESPACE | grep -w $NAMESPACE) ]]; then
+            echo "This environment already exist, please make sure to delete it, or use another name"
+            exit 1
+          else
+            echo "::set-output name=env_checks::true"
+            echo "namespace is ok, true"
+          fi
+
+  setup:
+    name: Creating Environment
+    needs: checkup
+    if: needs.checkup.outputs.env_checks == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+    timeout-minutes: 30
+    steps:
+      # Preparing environment
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - uses: "google-github-actions/auth@v1"
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY }}
+          service_account: ${{ env.SERVICE_ACCOUNT }}
+
+      # Configure docker to use the gcloud command-line tool as a credential helper
+      - name: Authenticate docker registry
+        run: |-
+          gcloud --quiet auth configure-docker
+
+      # Get the GKE credentials so we can deploy to the cluster
+      - uses: google-github-actions/get-gke-credentials@v1
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GKE_ZONE }}
+
+      - name: Set up Helm
+        run: |-
+          wget https://get.helm.sh/helm-v3.7.1-linux-amd64.tar.gz && tar xzvf helm-v3.7.1-linux-amd64.tar.gz
+          sudo mv linux-amd64/helm /usr/bin && sudo chmod a+x /usr/bin/helm
+          wget https://github.com/mozilla/sops/releases/download/v3.7.3/sops-v3.7.3.linux
+          sudo mv sops-v3.7.3.linux /usr/bin/sops && sudo chmod a+x /usr/bin/sops
+          helm plugin install https://github.com/hayorov/helm-gcs.git
+          helm plugin install https://github.com/jkroepke/helm-secrets --version v3.8.2
+          helm repo add private ${{ secrets.HELM_REPO }}
+
+      - run: echo "SHORT_SHA=`echo ${GITHUB_SHA} | cut -c1-7`" >> $GITHUB_ENV
+      - run: echo "NAMESPACE=${{ github.event.inputs.name }}" >> $GITHUB_ENV
+
+      - name: Extract services versions
+        run: |
+          echo "hello_world_version=${{ github.event.inputs.hello_world_version }}" >> $GITHUB_ENV
+          
+      - name: Create Namespace
+        run: |-
+          kubectl create namespace "${NAMESPACE}"
+
+      - name: Installing Hello World Chart
+        if: env.hello_world_version != 'null'
+        run: |-
+          helm repo update
+          helm install "hello-world" "private/hello-world" \
+          --set base.image.stableTag="$hello_world_version" \
+          --set base.ingress.host="hello-world-${NAMESPACE}.lab.com" \
+          --version="1.0.0-$hello_world_version" -n "${NAMESPACE}"

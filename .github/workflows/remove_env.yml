@@ -1,0 +1,107 @@
+name: Removing On-Demand Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "Environment_Name/Namespace"
+        required: true
+        default: ""
+
+      mysql_snapshot:
+        type: boolean
+        description: "Create MySQL Snapshot"
+        required: true
+        default: false
+
+env:
+  PROJECT_ID: ${{ secrets.PROJECT_ID }}
+  GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}
+  GKE_ZONE: ${{ secrets.GKE_ZONE }}
+  WORKLOAD_IDENTITY: ${{ secrets.WORKLOAD_IDENTITY }}
+  SERVICE_ACCOUNT: ${{ secrets.SERVICE_ACCOUNT }}
+jobs:
+  setup:
+    name: Namespace removing
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - uses: "google-github-actions/auth@v1"
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY }}
+          service_account: ${{ env.SERVICE_ACCOUNT }}
+
+      # Configure docker to use the gcloud command-line tool as a credential helper
+      - run: |-
+          gcloud --quiet auth configure-docker
+
+      # Get the GKE credentials so we can deploy to the cluster
+      - uses: google-github-actions/get-gke-credentials@v1
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GKE_ZONE }}
+
+      - name: Add short sha env
+        run: echo "SHORT_SHA=`echo ${GITHUB_SHA} | cut -c1-7`" >> $GITHUB_ENV
+
+      - name: Set NameSpace name
+        run: |-
+          echo "NAMESPACE=${{ github.event.inputs.name }}" >> $GITHUB_ENV
+
+      - name: Namespace Checkup
+        run: |
+          echo "=============== Check the Namespace ==============="
+          if [[ $(kubectl get ns $NAMESPACE | grep -w $NAMESPACE) ]]; then
+            if [[ ${{ github.event.inputs.mysql_snapshot }} == 'true' ]]; then
+              gcloud compute disks snapshot $NAMESPACE-db \
+                --zone=$GKE_ZONE --snapshot-names=$NAMESPACE-db-$SHORT_SHA --project=$PROJECT_ID
+              echo "***************** YOUR SNAPSHOT NAME IS $NAMESPACE-db-$SHORT_SHA *****************"
+            fi
+            if [[ ! $(kubectl get ns master -o jsonpath='{.metadata.annotations}' | grep -q 'protected') ]]; then
+              echo "=============== Starting Environment Removing ==============="
+              kubectl delete ns $NAMESPACE
+              sleep 30;
+            else
+              echo "Your Environment is PROTECTED, Can not be updated!"
+            fi
+          else
+            echo "Your Environment does not exist"
+          fi
+          
+  slack:
+    name: Slack notification
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+    timeout-minutes: 30
+    steps:
+      # Preparing environment
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Slack Notification
+        if: github.event.inputs.mysql_snapshot == 'true' 
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_COLOR: ${{ job.status }}
+          SLACK_USERNAME: demandly-actions
+          SLACK_MESSAGE: "Remove environment ${{ github.event.inputs.name }} and take snapshot"
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+
+      - name: Slack Notification
+        if: github.event.inputs.mysql_snapshot == 'false' 
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_COLOR: ${{ job.status }}
+          SLACK_USERNAME: demandly-actions
+          SLACK_MESSAGE: "Remove ${{ github.event.inputs.name }} environment"
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}

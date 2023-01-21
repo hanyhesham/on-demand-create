@@ -1,0 +1,52 @@
+name: Create MySQL Snapshot
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "Enter your env name"
+        required: true
+        default: "master"
+env:
+  PROJECT_ID: ${{ secrets.PROJECT_ID }}
+  GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}
+  GKE_ZONE: ${{ secrets.GKE_ZONE }}
+  WORKLOAD_IDENTITY: ${{ secrets.WORKLOAD_IDENTITY }}
+  SERVICE_ACCOUNT: ${{ secrets.SERVICE_ACCOUNT }}
+jobs:
+  setup:
+    name: Creating Snapshot
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - uses: "google-github-actions/auth@v1"
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY }}
+          service_account: ${{ env.SERVICE_ACCOUNT }}
+
+      # Configure docker to use the gcloud command-line tool as a credential helper
+      - run: |-
+          gcloud --quiet auth configure-docker
+
+      # Get the GKE credentials so we can deploy to the cluster
+      - uses: google-github-actions/get-gke-credentials@v1
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GKE_ZONE }}
+
+      - name: Add short sha env
+        run: echo "SHORT_SHA=`echo ${GITHUB_SHA} | cut -c1-7`" >> $GITHUB_ENV
+
+      - name: Get NameSpace
+        run: |-
+          echo "NAMESPACE=${{ github.event.inputs.name }}" >> $GITHUB_ENV
+
+      - name: Create Snapshot
+        run: |-
+          gcloud compute disks snapshot $NAMESPACE-db \
+          --zone=$GKE_ZONE --snapshot-names=ondemand-$NAMESPACE-db-$SHORT_SHA --project=$PROJECT_ID
+          echo "***************** YOUR SNAPSHOT NAME IS ondemand-$NAMESPACE-db-$SHORT_SHA *****************"

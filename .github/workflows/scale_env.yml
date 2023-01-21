@@ -1,0 +1,112 @@
+name: Scale your Environment
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "Environment_Name/Namespace"
+        required: true
+        default: ""
+      scale:
+        type: choice
+        description: "scaling type"
+        required: true
+        options:
+          - ""
+          - "up"
+          - "down"
+env:
+  PROJECT_ID: ${{ secrets.PROJECT_ID }}
+  GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}
+  GKE_ZONE: ${{ secrets.GKE_ZONE }}
+  WORKLOAD_IDENTITY: ${{ secrets.WORKLOAD_IDENTITY }}
+  SERVICE_ACCOUNT: ${{ secrets.SERVICE_ACCOUNT }}
+jobs:
+  setup:
+    name: Scaling
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - uses: "google-github-actions/auth@v1"
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY }}
+          service_account: ${{ env.SERVICE_ACCOUNT }}
+
+      # Configure docker to use the gcloud command-line tool as a credential helper
+      - run: |-
+          gcloud --quiet auth configure-docker
+
+      # Get the GKE credentials so we can deploy to the cluster
+      - uses: google-github-actions/get-gke-credentials@v1
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GKE_ZONE }}
+
+      - name: Set NameSpace name
+        run: |-
+          echo "NAMESPACE=${{ github.event.inputs.name }}" >> $GITHUB_ENV
+
+      - name: Namespace Checkup
+        id: check_namespace
+        run: |
+          echo "=============== Check the Namespace ==============="
+          if [[ $(kubectl get ns $NAMESPACE | grep -w $NAMESPACE) ]]; then
+            echo ENV_EXISTS=true >> $GITHUB_ENV
+            if [[ ! $(kubectl get ns $NAMESPACE -o jsonpath='{.metadata.annotations}' | grep 'protected') ]]; then
+              if [[ ${{ github.event.inputs.scale }} == 'up' ]]; then
+                echo "=============== Scaling Deployments ==============="
+                kubectl scale deploy -n $NAMESPACE --replicas=1 --all
+                echo "============== Scaling StatefulSets ==============="
+                kubectl scale statefulset -n $NAMESPACE --replicas=1 --all
+              elif [[ ${{ github.event.inputs.scale }} == 'down' ]]; then
+                echo "=============== Scaling Deployments ==============="
+                kubectl scale deploy -n $NAMESPACE --replicas=0 --all
+                echo "============== Scaling StatefulSets ==============="
+                kubectl scale statefulset -n $NAMESPACE --replicas=0 --all
+              fi
+            else
+              echo "Your Environment is PROTECTED, Can not be updated!"
+              exit 1
+            fi
+          else
+            echo "Your Environment does not exists"
+            exit 1
+          fi
+
+  slack:
+    name: Slack notification
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+    timeout-minutes: 30
+    steps:
+      # Preparing environment
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Slack Notification
+        if:  github.event.inputs.scale == 'down'
+        uses: rtCamp/action-slack-notify@v3
+        env:
+          SLACK_COLOR: ${{ job.status }}
+          SLACK_USERNAME: demandly-actions
+          SLACK_MESSAGE: "Scale down ${{ github.event.inputs.name }} environment"
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+
+      - name: Slack Notification
+        if: github.event.inputs.scale == 'up'
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_COLOR: ${{ job.status }}
+          SLACK_USERNAME: demandly-actions
+          SLACK_MESSAGE: "Scale up ${{ github.event.inputs.name }} environment"
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+
