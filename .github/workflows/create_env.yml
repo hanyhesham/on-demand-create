@@ -8,11 +8,6 @@ on:
         required: true
         default: ""
 
-      mysql_snapshot:
-        description: "MySQL snapshot to provision the env with"
-        required: false
-        default: staging-24-12-2022
-
       hello_world_version:
         description: "Hello World Version"
         required: true
@@ -137,3 +132,25 @@ jobs:
           --set base.image.stableTag="$hello_world_version" \
           --set base.ingress.host="hello-world-${NAMESPACE}.lab.com" \
           --version="1.0.0-$hello_world_version" -n "${NAMESPACE}"
+
+  slack:
+    name: Slack notification
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+    timeout-minutes: 30
+    steps:
+      # Preparing environment
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Slack Notification
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_COLOR: ${{ job.status }}
+          SLACK_USERNAME: demandly-actions
+          SLACK_MESSAGE: "Create ${{ github.event.inputs.name }} environment"
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}

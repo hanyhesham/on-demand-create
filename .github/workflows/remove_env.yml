@@ -8,12 +8,6 @@ on:
         required: true
         default: ""
 
-      mysql_snapshot:
-        type: boolean
-        description: "Create MySQL Snapshot"
-        required: true
-        default: false
-
 env:
   PROJECT_ID: ${{ secrets.PROJECT_ID }}
   GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}
@@ -57,11 +51,6 @@ jobs:
         run: |
           echo "=============== Check the Namespace ==============="
           if [[ $(kubectl get ns $NAMESPACE | grep -w $NAMESPACE) ]]; then
-            if [[ ${{ github.event.inputs.mysql_snapshot }} == 'true' ]]; then
-              gcloud compute disks snapshot $NAMESPACE-db \
-                --zone=$GKE_ZONE --snapshot-names=$NAMESPACE-db-$SHORT_SHA --project=$PROJECT_ID
-              echo "***************** YOUR SNAPSHOT NAME IS $NAMESPACE-db-$SHORT_SHA *****************"
-            fi
             if [[ ! $(kubectl get ns master -o jsonpath='{.metadata.annotations}' | grep -q 'protected') ]]; then
               echo "=============== Starting Environment Removing ==============="
               kubectl delete ns $NAMESPACE
